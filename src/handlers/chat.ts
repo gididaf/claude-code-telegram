@@ -3,6 +3,7 @@ import { runClaude } from '../services/claude.js';
 import { state, resetProcessState } from '../state/session-state.js';
 import { config } from '../config.js';
 import { formatForTelegram, formatCostFooter, truncateForEdit, type FormattedMessage } from '../ui/formatter.js';
+import { cancelKeyboard } from '../ui/keyboards.js';
 import { handleFolderNameInput } from './newproject.js';
 
 export async function handleChat(ctx: Context): Promise<void> {
@@ -28,7 +29,7 @@ export async function handleChat(ctx: Context): Promise<void> {
   state.isProcessing = true;
   state.accumulatedText = '';
 
-  const thinkingMsg = await ctx.reply('⏳ Thinking...');
+  const thinkingMsg = await ctx.reply('⏳ Thinking...', { reply_markup: cancelKeyboard() });
   state.lastResponseMessageId = thinkingMsg.message_id;
   state.lastResponseChatId = ctx.chat!.id;
 
@@ -55,7 +56,8 @@ export async function handleChat(ctx: Context): Promise<void> {
       await ctx.api.editMessageText(
         state.lastResponseChatId!,
         targetMsgId,
-        displayText
+        displayText,
+        { reply_markup: cancelKeyboard() }
       );
       lastEditTime = Date.now();
     } catch (err: any) {
@@ -87,6 +89,29 @@ export async function handleChat(ctx: Context): Promise<void> {
   claude.on('tool-use', (toolName, detail) => {
     const info = detail ? `${toolName}: ${detail}` : toolName;
     state.accumulatedText += `\n🔧 ${info}\n`;
+    scheduleEdit();
+  });
+
+  claude.on('tool-result', (toolName, lineCount, isError) => {
+    const icon = isError ? '❌' : '✅';
+    const lines = lineCount > 0 ? ` (${lineCount} lines)` : '';
+
+    // Replace the first unreplaced 🔧 line for this tool with the result
+    const marker = `🔧 ${toolName}`;
+    const idx = state.accumulatedText.indexOf(marker);
+    if (idx !== -1) {
+      const lineEnd = state.accumulatedText.indexOf('\n', idx);
+      const oldLine = lineEnd !== -1
+        ? state.accumulatedText.substring(idx, lineEnd)
+        : state.accumulatedText.substring(idx);
+      const newLine = oldLine.replace('🔧', icon) + lines;
+      state.accumulatedText = lineEnd !== -1
+        ? state.accumulatedText.substring(0, idx) + newLine + state.accumulatedText.substring(lineEnd)
+        : state.accumulatedText.substring(0, idx) + newLine;
+    } else {
+      // Fallback: append as separate line
+      state.accumulatedText += `${icon} ${toolName}${lines}\n`;
+    }
     scheduleEdit();
   });
 

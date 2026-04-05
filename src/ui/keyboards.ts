@@ -113,6 +113,10 @@ export function startKeyboard(): InlineKeyboard {
     .text('🆕 New Project', 'new');
 }
 
+export function cancelKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text('✋ Cancel', 'cancel');
+}
+
 function truncLabel(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
   return text.substring(0, maxLen - 1) + '…';

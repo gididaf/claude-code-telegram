@@ -6,7 +6,7 @@ export interface ClaudeEvents {
   init: [sessionId: string, model: string];
   'text-delta': [text: string];
   'tool-use': [toolName: string, detail: string];
-  'tool-result': [toolName: string];
+  'tool-result': [toolName: string, lineCount: number, isError: boolean];
   'assistant-text': [fullText: string];
   result: [text: string, sessionId: string, costUsd: number, durationMs: number];
   error: [message: string];
@@ -74,6 +74,18 @@ function shortenPaths(text: string, cwd: string): string {
   return text;
 }
 
+function extractToolResultText(content: any): string {
+  if (!content) return '';
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((b: any) => b.type === 'text')
+      .map((b: any) => b.text || '')
+      .join('\n');
+  }
+  return '';
+}
+
 function truncDetail(s: string): string {
   if (s.length <= 80) return s;
   return s.substring(0, 77) + '...';
@@ -84,6 +96,7 @@ export class ClaudeProcess extends EventEmitter<ClaudeEvents> {
   private buffer: string = '';
   private cancelled: boolean = false;
   private cwd: string;
+  private toolNames: Map<string, string> = new Map();
 
   constructor(options: {
     prompt: string;
@@ -183,6 +196,9 @@ export class ClaudeProcess extends EventEmitter<ClaudeEvents> {
             (b: any) => b.type === 'tool_use'
           );
           for (const tool of toolBlocks) {
+            if (tool.id) {
+              this.toolNames.set(tool.id, tool.name);
+            }
             const detail = summarizeToolInput(tool.name, tool.input, this.cwd);
             this.emit('tool-use', tool.name, detail);
           }
@@ -195,7 +211,10 @@ export class ClaudeProcess extends EventEmitter<ClaudeEvents> {
             (b: any) => b.type === 'tool_result'
           );
           for (const tr of toolResults) {
-            this.emit('tool-result', tr.tool_use_id || 'unknown');
+            const toolName = this.toolNames.get(tr.tool_use_id) || 'Tool';
+            const content = extractToolResultText(tr.content);
+            const lineCount = content ? content.split('\n').length : 0;
+            this.emit('tool-result', toolName, lineCount, !!tr.is_error);
           }
         }
         break;

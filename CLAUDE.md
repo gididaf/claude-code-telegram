@@ -23,7 +23,7 @@ Single-user, single-process. No database — all state is in-memory (`src/state/
 
 ```
 User types message → auth middleware → chat handler
-  → sends "⏳ Thinking..." message
+  → sends "⏳ Thinking..." message with inline ✋ Cancel button
   → spawns: claude -p "msg" --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages [-r sessionId]
   → stream events parsed line-by-line as JSON
   → Telegram message edited every ~2.5s with accumulated text
@@ -32,7 +32,7 @@ User types message → auth middleware → chat handler
 
 ### Key Modules
 
-- **`src/services/claude.ts`** — ClaudeProcess (EventEmitter). Spawns CLI, parses stream-json. Events: init, text-delta, tool-use, tool-result, assistant-text, result, error. Has `cancelled` flag to suppress errors on intentional kill.
+- **`src/services/claude.ts`** — ClaudeProcess (EventEmitter). Spawns CLI, parses stream-json. Events: init, text-delta, tool-use, tool-result, assistant-text, result, error. Has `cancelled` flag to suppress errors on intentional kill. Tracks `toolNames` map (tool_use_id → name) to enrich tool-result events with name, line count, and error status.
 - **`src/handlers/chat.ts`** — Orchestrates prompt → stream → live edit → split messages. 3-layer fallback: HTML edit → plain text edit → new message.
 - **`src/services/projects.ts`** — Reads `~/.claude/projects/`. Two strategies: sessions-index.json (rich metadata) or .jsonl file parsing fallback. Filters non-existent directories.
 - **`src/ui/formatter.ts`** — Markdown→HTML (code blocks, inline code, bold, italic, headers). Splits raw text FIRST, then converts each chunk to HTML independently (prevents mid-tag splitting).
@@ -46,6 +46,7 @@ Telegram limits callback data to 64 bytes. Short prefixes:
 
 | Prefix | Meaning | Example |
 |--------|---------|---------|
+| `cancel` | Cancel running process | `cancel` |
 | `p:` | Project list page | `p:0` |
 | `ps:` | Project select | `ps:3` |
 | `pr:` | Resume latest session | `pr:3` |
@@ -74,7 +75,8 @@ Telegram limits callback data to 64 bytes. Short prefixes:
 - Projects without `sessions-index.json` fall back to scanning `.jsonl` files. UUID-named subdirectories are subagent containers, not sessions — only count `.jsonl` files.
 - The `cancelled` flag on ClaudeProcess prevents "exited with code 143" errors when user runs /cancel.
 - Formatter splits raw text FIRST then converts each chunk to HTML. This was a critical fix — splitting HTML can break mid-tag.
-- Tool indicators (`🔧 Bash: ls -la`) are embedded in `accumulatedText` during streaming, then replaced by the final result.
+- Tool indicators (`🔧 Bash: ls -la`) are embedded in `accumulatedText` during streaming, then replaced by the final result. When a tool completes, its `🔧` line is replaced **in-place** with `✅`/`❌` + line count (e.g. `✅ Bash: ls -la (13 lines)`). Uses `indexOf` to match the first unreplaced `🔧` for that tool name — handles parallel same-name tools correctly.
+- Inline ✋ Cancel button is attached to the "Thinking..." message and all streaming edits via `reply_markup`. The keyboard is automatically removed when the final result/error edit omits `reply_markup`. The cancel callback in `callbacks.ts` kills the process, resets state, and edits the message to "🚫 Cancelled."
 
 ## Environment Variables
 

@@ -11,13 +11,30 @@ import { handleNewProject, handleDirNavigate, handleDirSelect, handleCreateFolde
 import { decodePath } from '../services/directory-browser.js';
 import { listSessions } from '../services/projects.js';
 import { sessionListKeyboardByDir } from '../ui/keyboards.js';
-import { state } from '../state/session-state.js';
+import { state, resetProcessState } from '../state/session-state.js';
 
 export async function handleCallback(ctx: Context): Promise<void> {
   const data = ctx.callbackQuery?.data;
   if (!data) return;
 
   try {
+    // Cancel running process
+    if (data === 'cancel') {
+      if (!state.isProcessing || !state.runningClaude) {
+        await ctx.answerCallbackQuery('Nothing is running.');
+        return;
+      }
+      state.runningClaude.kill();
+      resetProcessState();
+      try {
+        await ctx.editMessageText('🚫 Cancelled.');
+      } catch {
+        // Message may already be gone
+      }
+      await ctx.answerCallbackQuery('Cancelled');
+      return;
+    }
+
     // Project list pages: p:0, p:1, ...
     if (data.startsWith('p:')) {
       const page = parseInt(data.substring(2), 10);
