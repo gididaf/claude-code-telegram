@@ -6,11 +6,13 @@ import {
   handleSessionSelect,
   handleResumeLatest,
   handleNewSession,
+  handleSessionHistory,
+  handleForkSession,
 } from './sessions.js';
 import { handleNewProject, handleDirNavigate, handleDirSelect, handleCreateFolderPrompt } from './newproject.js';
 import { decodePath } from '../services/directory-browser.js';
 import { listSessions } from '../services/projects.js';
-import { sessionListKeyboardByDir } from '../ui/keyboards.js';
+import { sessionListKeyboardByDir, sessionLoadedKeyboard } from '../ui/keyboards.js';
 import { state, resetProcessState } from '../state/session-state.js';
 
 export async function handleCallback(ctx: Context): Promise<void> {
@@ -123,6 +125,22 @@ export async function handleCallback(ctx: Context): Promise<void> {
       return;
     }
 
+    // Session fork: sf:messageIndex
+    if (data.startsWith('sf:')) {
+      const msgIdx = parseInt(data.substring(3), 10);
+      await handleForkSession(ctx, msgIdx);
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    // Session history: sh:page
+    if (data.startsWith('sh:')) {
+      const page = parseInt(data.substring(3), 10);
+      await handleSessionHistory(ctx, page);
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
     // Session list for current project (no index): slc:page
     if (data.startsWith('slc:')) {
       const page = parseInt(data.substring(4), 10);
@@ -163,7 +181,7 @@ export async function handleCallback(ctx: Context): Promise<void> {
         `<b>Session:</b> ${escapeHtml(session.summary)}\n` +
         `<b>Messages:</b> ${session.messageCount}\n\n` +
         `Send a message to continue this session.`;
-      await ctx.editMessageText(text, { parse_mode: 'HTML' });
+      await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: sessionLoadedKeyboard() });
       await ctx.answerCallbackQuery();
       return;
     }

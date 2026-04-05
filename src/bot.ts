@@ -7,6 +7,7 @@ import { handleCancel } from './handlers/cancel.js';
 import { handleProjects } from './handlers/projects.js';
 import { handleNewProject } from './handlers/newproject.js';
 import { handleSession, handleStatus } from './handlers/status.js';
+import { handleHistoryCommand } from './handlers/sessions.js';
 import { handleCallback } from './handlers/callbacks.js';
 import { handleChat } from './handlers/chat.js';
 
@@ -23,6 +24,7 @@ export function createBot(): Bot {
   bot.command('projects', (ctx) => handleProjects(ctx, 0));
   bot.command('new', handleNewProject);
   bot.command('session', handleSession);
+  bot.command('history', handleHistoryCommand);
   bot.command('status', handleStatus);
 
   // Callback queries (inline keyboard)

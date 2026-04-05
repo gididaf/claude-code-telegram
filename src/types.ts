@@ -35,6 +35,12 @@ export interface SessionsIndex {
   originalPath: string;
 }
 
+export interface ConversationMessage {
+  role: 'user' | 'assistant';
+  text: string;
+  timestamp: string;
+}
+
 export interface SessionsIndexEntry {
   sessionId: string;
   fullPath: string;

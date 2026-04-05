@@ -34,7 +34,7 @@ User types message → auth middleware → chat handler
 
 - **`src/services/claude.ts`** — ClaudeProcess (EventEmitter). Spawns CLI, parses stream-json. Events: init, text-delta, tool-use, tool-result, assistant-text, result, error. Has `cancelled` flag to suppress errors on intentional kill. Tracks `toolNames` map (tool_use_id → name) to enrich tool-result events with name, line count, and error status.
 - **`src/handlers/chat.ts`** — Orchestrates prompt → stream → live edit → split messages. 3-layer fallback: HTML edit → plain text edit → new message.
-- **`src/services/projects.ts`** — Reads `~/.claude/projects/`. Two strategies: sessions-index.json (rich metadata) or .jsonl file parsing fallback. Filters non-existent directories.
+- **`src/services/projects.ts`** — Reads `~/.claude/projects/`. Scans actual `.jsonl` files on disk, enriches with sessions-index.json metadata where available. Filters non-existent directories. Also provides `getSessionHistory()` for reading full conversation and `forkSessionAt()` for creating truncated session forks.
 - **`src/ui/formatter.ts`** — Markdown→HTML (code blocks, inline code, bold, italic, headers). Splits raw text FIRST, then converts each chunk to HTML independently (prevents mid-tag splitting).
 - **`src/handlers/callbacks.ts`** — Central callback router for all inline keyboard actions.
 - **`src/services/directory-browser.ts`** — Filesystem navigation. In-memory `pathCache` Map solves Telegram's 64-byte callback data limit.
@@ -57,6 +57,8 @@ Telegram limits callback data to 64 bytes. Short prefixes:
 | `ds:` | Directory select | `ds:42` |
 | `dp:` | Directory page | `dp:42:1` (pathId:page) |
 | `cf:` | Create folder | `cf:42` |
+| `sh:` | Session history page | `sh:0` |
+| `sf:` | Fork session at message | `sf:7` |
 | `slc:` | Session list (current project) | `slc:0` |
 | `ssc:` | Session select (current) | `ssc:2` |
 | `snc` | New session (current) | `snc` |
@@ -71,12 +73,16 @@ Telegram limits callback data to 64 bytes. Short prefixes:
 ## Known Patterns & Gotchas
 
 - `escapeHtml()` is duplicated across several files (handlers, formatter) — intentional to keep each module self-contained.
-- `pathToDirName()` converts absolute paths to Claude's project dir format: `/Users/foo/bar` → `-Users-foo-bar`.
-- Projects without `sessions-index.json` fall back to scanning `.jsonl` files. UUID-named subdirectories are subagent containers, not sessions — only count `.jsonl` files.
+- `pathToDirName()` converts absolute paths to Claude's project dir format: `/Users/foo/bar` → `-Users-foo-bar`. Also duplicated in `sessions.ts` and `callbacks.ts` since `state.currentProjectDir` may be null (e.g. when using `DEFAULT_PROJECT_PATH`).
+- `sessions-index.json` can be stale — it may reference sessions whose `.jsonl` files no longer exist on disk. `listSessions()` validates against actual files and merges in on-disk sessions missing from the index.
+- UUID-named subdirectories in project dirs are subagent containers, not sessions — only `.jsonl` files are sessions.
 - The `cancelled` flag on ClaudeProcess prevents "exited with code 143" errors when user runs /cancel.
 - Formatter splits raw text FIRST then converts each chunk to HTML. This was a critical fix — splitting HTML can break mid-tag.
 - Tool indicators (`🔧 Bash: ls -la`) are embedded in `accumulatedText` during streaming, then replaced by the final result. When a tool completes, its `🔧` line is replaced **in-place** with `✅`/`❌` + line count (e.g. `✅ Bash: ls -la (13 lines)`). Uses `indexOf` to match the first unreplaced `🔧` for that tool name — handles parallel same-name tools correctly.
 - Inline ✋ Cancel button is attached to the "Thinking..." message and all streaming edits via `reply_markup`. The keyboard is automatically removed when the final result/error edit omits `reply_markup`. The cancel callback in `callbacks.ts` kills the process, resets state, and edits the message to "🚫 Cancelled."
+- **Session JSONL format**: Each line is a single content block (not a full message). An assistant turn spans multiple lines: thinking, text, tool_use. User tool_result lines follow. Real user prompts are `{role: "user", content: "string"}` lines.
+- **Fork**: Creates a new `.jsonl` with lines truncated at a specific visible message. Only fork at **assistant messages** — forking at a user message would leave a dangling user turn, causing two consecutive user messages when resumed. The original session file is never modified.
+- **History**: `/history` command and `📜 View History` button. Filters JSONL to show only user text prompts and assistant text responses (skips tool_use, tool_result, thinking, system lines). Messages numbered for fork reference.
 
 ## Environment Variables
 

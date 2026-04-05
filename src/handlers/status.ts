@@ -33,6 +33,10 @@ export async function handleSession(ctx: Context): Promise<void> {
 
   const kb = new InlineKeyboard();
 
+  if (state.currentSessionId) {
+    kb.text('📜 History', 'sh:0').row();
+  }
+
   if (projectIdx >= 0) {
     kb.text('📋 Switch Session', `sl:${projectIdx}:0`)
       .text('✨ New Session', `sn:${projectIdx}`);

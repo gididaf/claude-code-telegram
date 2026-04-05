@@ -1,8 +1,9 @@
 import { access } from 'fs/promises';
 import type { Context } from 'grammy';
-import { listProjects, listSessions } from '../services/projects.js';
-import { projectMenuKeyboard, sessionListKeyboard } from '../ui/keyboards.js';
+import { listProjects, listSessions, getSessionHistory, forkSessionAt } from '../services/projects.js';
+import { projectMenuKeyboard, sessionListKeyboard, sessionLoadedKeyboard, historyKeyboard } from '../ui/keyboards.js';
 import { state } from '../state/session-state.js';
+import { paginate } from '../ui/paginator.js';
 
 export async function handleProjectSelect(ctx: Context, projectIndex: number): Promise<void> {
   const projects = await listProjects();
@@ -85,7 +86,7 @@ export async function handleSessionSelect(ctx: Context, projectIndex: number, se
     `<b>Last active:</b> ${formatDate(session.modified)}\n\n` +
     `Send a message to continue this session.`;
 
-  await ctx.editMessageText(text, { parse_mode: 'HTML' });
+  await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: sessionLoadedKeyboard() });
 }
 
 export async function handleResumeLatest(ctx: Context, projectIndex: number): Promise<void> {
@@ -132,6 +133,105 @@ export async function handleNewSession(ctx: Context, projectIndex: number): Prom
     `<b>✨ New session</b> in ${escapeHtml(project.displayName)}\n\nSend a message to start.`,
     { parse_mode: 'HTML' }
   );
+}
+
+const HISTORY_PAGE_SIZE = 4;
+const MSG_TRUNCATE_LEN = 500;
+
+export async function handleSessionHistory(ctx: Context, page: number): Promise<void> {
+  if (!state.currentProjectPath || !state.currentSessionId) {
+    try { await ctx.answerCallbackQuery('No session loaded'); } catch { /* ignore */ }
+    return;
+  }
+
+  const dirName = state.currentProjectDir || pathToDirName(state.currentProjectPath);
+
+  let messages;
+  try {
+    messages = await getSessionHistory(dirName, state.currentSessionId);
+  } catch (err: any) {
+    const msg = err.code === 'ENOENT'
+      ? 'Session file not found — may have been cleaned up'
+      : 'Could not read session file';
+    if (ctx.callbackQuery) {
+      try { await ctx.answerCallbackQuery(msg); } catch { /* ignore */ }
+    } else {
+      await ctx.reply(msg);
+    }
+    return;
+  }
+
+  if (messages.length === 0) {
+    try { await ctx.answerCallbackQuery('No messages found'); } catch { /* ignore */ }
+    return;
+  }
+
+  const pageData = paginate(messages, page, HISTORY_PAGE_SIZE);
+  const firstMsgIndex = pageData.page * HISTORY_PAGE_SIZE;
+
+  let text = `<b>📜 Session History</b> (${pageData.totalItems} messages)\n\n`;
+
+  for (let i = 0; i < pageData.items.length; i++) {
+    const msg = pageData.items[i];
+    const num = firstMsgIndex + i + 1;
+    const icon = msg.role === 'user' ? '👤' : '🤖';
+    let content = msg.text;
+    if (content.length > MSG_TRUNCATE_LEN) {
+      content = content.substring(0, MSG_TRUNCATE_LEN) + '…';
+    }
+    text += `<b>#${num}</b> ${icon} <b>${msg.role === 'user' ? 'You' : 'Claude'}:</b>\n${escapeHtml(content)}\n\n`;
+  }
+
+  // Trim to stay under Telegram limit
+  if (text.length > 4000) {
+    text = text.substring(0, 3990) + '\n…';
+  }
+
+  const roles = pageData.items.map(m => m.role);
+  const kb = historyKeyboard(pageData.page, pageData.totalPages, firstMsgIndex, roles);
+
+  if (ctx.callbackQuery) {
+    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
+  } else {
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+  }
+}
+
+export async function handleHistoryCommand(ctx: Context): Promise<void> {
+  if (!state.currentProjectPath || !state.currentSessionId) {
+    await ctx.reply('No session loaded. Use /projects to select one.');
+    return;
+  }
+  await handleSessionHistory(ctx, 0);
+}
+
+export async function handleForkSession(ctx: Context, messageIndex: number): Promise<void> {
+  if (!state.currentProjectPath || !state.currentSessionId) {
+    try { await ctx.answerCallbackQuery('No session loaded'); } catch { /* ignore */ }
+    return;
+  }
+
+  const dirName = state.currentProjectDir || pathToDirName(state.currentProjectPath);
+
+  try {
+    const newSessionId = await forkSessionAt(dirName, state.currentSessionId, messageIndex);
+    state.currentSessionId = newSessionId;
+
+    await ctx.editMessageText(
+      `<b>🔀 Session forked</b>\n\n` +
+      `Forked at message ${messageIndex + 1}. Send a message to continue from this point.`,
+      { parse_mode: 'HTML' }
+    );
+  } catch (err: any) {
+    const msg = err.code === 'ENOENT'
+      ? 'Session file not found'
+      : 'Failed to fork session';
+    try { await ctx.answerCallbackQuery(msg); } catch { /* ignore */ }
+  }
+}
+
+function pathToDirName(path: string): string {
+  return '-' + path.substring(1).replace(/\//g, '-');
 }
 
 function formatDate(date: Date): string {

@@ -107,6 +107,47 @@ export function sessionListKeyboardByDir(
   return { keyboard: kb, pageInfo: pageData };
 }
 
+export function historyKeyboard(
+  page: number,
+  totalPages: number,
+  firstMsgIndex: number,
+  roles: Array<'user' | 'assistant'>,
+): InlineKeyboard {
+  const kb = new InlineKeyboard();
+
+  // Fork buttons — only for assistant (Claude) messages
+  let btnCount = 0;
+  for (let i = 0; i < roles.length; i++) {
+    if (roles[i] !== 'assistant') continue;
+    const globalIdx = firstMsgIndex + i;
+    kb.text(`🔀 Fork at #${globalIdx + 1}`, `sf:${globalIdx}`);
+    btnCount++;
+    if (btnCount % 2 === 0) kb.row();
+  }
+  if (btnCount > 0 && btnCount % 2 !== 0) kb.row();
+
+  const navRow: Array<{ text: string; data: string }> = [];
+  if (page > 0) {
+    navRow.push({ text: '◀ Newer', data: `sh:${page - 1}` });
+  }
+  if (totalPages > 1) {
+    navRow.push({ text: `${page + 1}/${totalPages}`, data: 'noop' });
+  }
+  if (page < totalPages - 1) {
+    navRow.push({ text: 'Older ▶', data: `sh:${page + 1}` });
+  }
+  for (const btn of navRow) {
+    kb.text(btn.text, btn.data);
+  }
+
+  return kb;
+}
+
+export function sessionLoadedKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text('📜 View History', 'sh:0');
+}
+
 export function startKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('📂 Browse Projects', 'p:0')

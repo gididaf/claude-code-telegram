@@ -1,7 +1,8 @@
-import { access, readdir, readFile, stat } from 'fs/promises';
+import { access, readdir, readFile, stat, writeFile } from 'fs/promises';
+import { randomUUID } from 'crypto';
 import { join } from 'path';
 import { config } from '../config.js';
-import type { ProjectInfo, SessionInfo, SessionsIndex } from '../types.js';
+import type { ConversationMessage, ProjectInfo, SessionInfo, SessionsIndex } from '../types.js';
 
 const IGNORED_PREFIXES = ['-private-var', '-private-tmp'];
 
@@ -40,35 +41,21 @@ export async function listProjects(): Promise<ProjectInfo[]> {
 async function buildProjectInfo(dirName: string): Promise<ProjectInfo | null> {
   const projectDir = join(config.claudeProjectsDir, dirName);
 
-  // Try sessions-index.json first (has rich metadata)
-  const index = await readSessionsIndex(dirName);
-  if (index && index.entries.length > 0) {
-    const realEntries = index.entries.filter(e => !e.isSidechain);
-    if (realEntries.length > 0) {
-      const latestEntry = realEntries.reduce((a, b) =>
-        new Date(b.modified) > new Date(a.modified) ? b : a
-      );
-
-      const originalPath = index.originalPath || latestEntry.projectPath || dirNameToPath(dirName);
-      return {
-        dirName,
-        originalPath,
-        displayName: pathToDisplayName(originalPath),
-        sessionCount: realEntries.length,
-        lastModified: new Date(latestEntry.modified),
-      };
-    }
+  // Count actual .jsonl files on disk
+  let jsonlFiles: string[];
+  try {
+    const entries = await readdir(projectDir);
+    jsonlFiles = entries.filter(e => e.endsWith('.jsonl'));
+  } catch {
+    return null;
   }
-
-  // Fallback: count .jsonl session files (UUID dirs are subagent containers, not sessions)
-  const entries = await readdir(projectDir);
-  const jsonlFiles = entries.filter(e => e.endsWith('.jsonl'));
 
   if (jsonlFiles.length === 0) return null;
 
-  // Get last modified time from directory
+  // Use index for originalPath if available
+  const index = await readSessionsIndex(dirName);
+  const originalPath = index?.originalPath || dirNameToPath(dirName);
   const dirStat = await stat(projectDir);
-  const originalPath = dirNameToPath(dirName);
 
   return {
     dirName,
@@ -80,12 +67,27 @@ async function buildProjectInfo(dirName: string): Promise<ProjectInfo | null> {
 }
 
 export async function listSessions(dirName: string): Promise<SessionInfo[]> {
-  // Try index first
+  const projectDir = join(config.claudeProjectsDir, dirName);
+
+  // Get actual .jsonl files on disk
+  let jsonlFiles: Set<string>;
+  try {
+    const entries = await readdir(projectDir);
+    jsonlFiles = new Set(entries.filter(e => e.endsWith('.jsonl')).map(e => e.replace('.jsonl', '')));
+  } catch {
+    return [];
+  }
+
+  const sessions: SessionInfo[] = [];
+  const coveredIds = new Set<string>();
+
+  // Use index for rich metadata, but only for sessions that exist on disk
   const index = await readSessionsIndex(dirName);
   if (index && index.entries.length > 0) {
-    const sessions = index.entries
-      .filter(e => !e.isSidechain)
-      .map(e => ({
+    for (const e of index.entries) {
+      if (e.isSidechain || !jsonlFiles.has(e.sessionId)) continue;
+      coveredIds.add(e.sessionId);
+      sessions.push({
         sessionId: e.sessionId,
         summary: e.summary || '(no summary)',
         messageCount: e.messageCount,
@@ -95,22 +97,14 @@ export async function listSessions(dirName: string): Promise<SessionInfo[]> {
         projectPath: e.projectPath || '',
         firstPrompt: e.firstPrompt || '',
         isSidechain: e.isSidechain,
-      }));
-
-    sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
-    return sessions;
+      });
+    }
   }
 
-  // Fallback: parse .jsonl files directly
-  const projectDir = join(config.claudeProjectsDir, dirName);
-  const entries = await readdir(projectDir);
-  const jsonlFiles = entries.filter(e => e.endsWith('.jsonl'));
-
-  const sessions: SessionInfo[] = [];
-  for (const file of jsonlFiles) {
-    const sessionId = file.replace('.jsonl', '');
-    const filePath = join(projectDir, file);
-
+  // Parse any .jsonl files not covered by the index
+  for (const sessionId of jsonlFiles) {
+    if (coveredIds.has(sessionId)) continue;
+    const filePath = join(projectDir, `${sessionId}.jsonl`);
     try {
       const meta = await parseSessionJsonl(filePath);
       sessions.push({
@@ -200,6 +194,107 @@ async function parseSessionJsonl(filePath: string): Promise<SessionMeta> {
     created: firstTimestamp ? new Date(firstTimestamp) : fileStat.birthtime,
     modified: lastTimestamp ? new Date(lastTimestamp) : fileStat.mtime,
   };
+}
+
+export async function getSessionHistory(dirName: string, sessionId: string): Promise<ConversationMessage[]> {
+  const filePath = join(config.claudeProjectsDir, dirName, `${sessionId}.jsonl`);
+  const raw = await readFile(filePath, 'utf-8');
+  const lines = raw.split('\n').filter(l => l.trim());
+
+  const messages: ConversationMessage[] = [];
+
+  for (const line of lines) {
+    try {
+      const d = JSON.parse(line);
+      const msg = d.message;
+      if (!msg?.role || (msg.role !== 'user' && msg.role !== 'assistant')) continue;
+
+      let text = '';
+      const toolNames: string[] = [];
+
+      if (typeof msg.content === 'string') {
+        text = msg.content;
+      } else if (Array.isArray(msg.content)) {
+        const textParts: string[] = [];
+        for (const block of msg.content) {
+          if (block.type === 'text' && block.text) {
+            textParts.push(block.text);
+          } else if (block.type === 'tool_use' && block.name) {
+            toolNames.push(block.name);
+          }
+        }
+        text = textParts.join('\n');
+      }
+
+      // Skip system/XML-only messages and empty messages
+      if (!text || (text.startsWith('<') && !text.includes('\n') && text.endsWith('>'))) continue;
+
+      // For assistant messages, append brief tool summary
+      if (msg.role === 'assistant' && toolNames.length > 0) {
+        text += `\n[Tools: ${toolNames.join(', ')}]`;
+      }
+
+      messages.push({
+        role: msg.role,
+        text,
+        timestamp: d.timestamp || '',
+      });
+    } catch {
+      // Skip malformed lines
+    }
+  }
+
+  return messages;
+}
+
+/**
+ * Fork a session at a specific visible message index.
+ * Creates a new .jsonl file containing all raw lines up to that message.
+ * Returns the new session ID.
+ */
+export async function forkSessionAt(dirName: string, sessionId: string, messageIndex: number): Promise<string> {
+  const filePath = join(config.claudeProjectsDir, dirName, `${sessionId}.jsonl`);
+  const raw = await readFile(filePath, 'utf-8');
+  const lines = raw.split('\n').filter(l => l.trim());
+
+  // Walk raw lines with same filter logic as getSessionHistory to count visible messages
+  let visibleCount = 0;
+  let cutAfterLine = lines.length - 1; // default: keep everything
+
+  for (let i = 0; i < lines.length; i++) {
+    try {
+      const d = JSON.parse(lines[i]);
+      const msg = d.message;
+      if (!msg?.role || (msg.role !== 'user' && msg.role !== 'assistant')) continue;
+
+      let text = '';
+      if (typeof msg.content === 'string') {
+        text = msg.content;
+      } else if (Array.isArray(msg.content)) {
+        text = msg.content.filter((b: any) => b.type === 'text' && b.text).map((b: any) => b.text).join('\n');
+      }
+
+      if (!text || (text.startsWith('<') && !text.includes('\n') && text.endsWith('>'))) continue;
+
+      // This is a visible message
+      if (visibleCount === messageIndex) {
+        cutAfterLine = i;
+        break;
+      }
+      visibleCount++;
+    } catch {
+      continue;
+    }
+  }
+
+  // Keep all raw lines up to and including cutAfterLine
+  const keptLines = lines.slice(0, cutAfterLine + 1);
+
+  const newSessionId = randomUUID();
+  const newPath = join(config.claudeProjectsDir, dirName, `${newSessionId}.jsonl`);
+  await writeFile(newPath, keptLines.join('\n') + '\n');
+
+  return newSessionId;
 }
 
 function dirNameToPath(dirName: string): string {
