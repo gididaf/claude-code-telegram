@@ -1,10 +1,14 @@
 import type { Context } from 'grammy';
-import { InlineKeyboard } from 'grammy';
 import { state } from '../state/session-state.js';
 import { listProjects, listSessions } from '../services/projects.js';
+import { sessionListKeyboard, sessionListKeyboardByDir } from '../ui/keyboards.js';
 
 function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function pathToDirName(path: string): string {
+  return '-' + path.substring(1).replace(/\//g, '-');
 }
 
 export async function handleSession(ctx: Context): Promise<void> {
@@ -16,36 +20,24 @@ export async function handleSession(ctx: Context): Promise<void> {
   const projects = await listProjects();
   const projectIdx = projects.findIndex(p => p.originalPath === state.currentProjectPath);
 
-  let sessionSummary = 'None (new session)';
-  if (state.currentSessionId) {
-    const project = projectIdx >= 0 ? projects[projectIdx] : null;
-    if (project) {
-      const sessions = await listSessions(project.dirName);
-      const session = sessions.find(s => s.sessionId === state.currentSessionId);
-      if (session) sessionSummary = session.summary;
-    }
+  const dirName = projectIdx >= 0
+    ? projects[projectIdx].dirName
+    : pathToDirName(state.currentProjectPath);
+
+  const sessions = await listSessions(dirName);
+
+  if (sessions.length === 0) {
+    await ctx.reply('No sessions found. Send a message to start one.');
+    return;
   }
 
-  const text =
-    `<b>💬 Session</b>\n\n` +
-    `<b>Project:</b> <code>${escapeHtml(state.currentProjectPath)}</code>\n` +
-    `<b>Session:</b> ${escapeHtml(sessionSummary)}`;
+  const { keyboard, pageInfo } = projectIdx >= 0
+    ? sessionListKeyboard(sessions, projectIdx, 0)
+    : sessionListKeyboardByDir(sessions, 0);
 
-  const kb = new InlineKeyboard();
+  const text = `<b>💬 Sessions</b> (${pageInfo.totalItems} total)\n\nSelect a session to resume:`;
 
-  if (state.currentSessionId) {
-    kb.text('📜 History', 'sh:0').row();
-  }
-
-  if (projectIdx >= 0) {
-    kb.text('📋 Switch Session', `sl:${projectIdx}:0`)
-      .text('✨ New Session', `sn:${projectIdx}`);
-  } else {
-    kb.text('📋 Switch Session', 'slc:0')
-      .text('✨ New Session', 'snc');
-  }
-
-  await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+  await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
 }
 
 export async function handleStatus(ctx: Context): Promise<void> {

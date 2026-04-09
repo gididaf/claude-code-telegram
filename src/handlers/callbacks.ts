@@ -7,13 +7,17 @@ import {
   handleResumeLatest,
   handleNewSession,
   handleSessionHistory,
-  handleForkSession,
+  handleRewindSession,
 } from './sessions.js';
-import { handleNewProject, handleDirNavigate, handleDirSelect, handleCreateFolderPrompt } from './newproject.js';
+import { handleBrowseDirectory, handleDirNavigate, handleDirSelect, handleCreateFolderPrompt } from './newproject.js';
 import { decodePath } from '../services/directory-browser.js';
 import { listSessions } from '../services/projects.js';
-import { sessionListKeyboardByDir, sessionLoadedKeyboard } from '../ui/keyboards.js';
+import { sessionListKeyboardByDir } from '../ui/keyboards.js';
 import { state, resetProcessState } from '../state/session-state.js';
+import { drainQueue, showCurrentQuestion, submitQuestionAnswers, processPrompt } from './chat.js';
+import { questionKeyboard } from '../ui/keyboards.js';
+import { readFile } from 'fs/promises';
+import { formatForTelegram } from '../ui/formatter.js';
 
 export async function handleCallback(ctx: Context): Promise<void> {
   const data = ctx.callbackQuery?.data;
@@ -26,14 +30,153 @@ export async function handleCallback(ctx: Context): Promise<void> {
         await ctx.answerCallbackQuery('Nothing is running.');
         return;
       }
+      const accumulated = state.accumulatedText;
+      const chatId = ctx.chat!.id;
       state.runningClaude.kill();
       resetProcessState();
       try {
-        await ctx.editMessageText('🚫 Cancelled.');
+        // Keep the current message with accumulated text, just remove the cancel button
+        if (accumulated) {
+          const display = accumulated.length > 4050
+            ? accumulated.substring(0, 4050) + '\n...'
+            : accumulated;
+          await ctx.editMessageText(display + '\n\n⚠️ Interrupted');
+        } else {
+          await ctx.editMessageText('⚠️ Interrupted');
+        }
       } catch {
         // Message may already be gone
       }
-      await ctx.answerCallbackQuery('Cancelled');
+      // If there's a queued message, auto-send it; otherwise prompt for next action
+      if (state.queuedMessage) {
+        await drainQueue(ctx.api, chatId);
+      } else {
+        try {
+          await ctx.reply('Interrupted · What should Claude do instead?');
+        } catch { /* ignore */ }
+      }
+      await ctx.answerCallbackQuery('Interrupted');
+      return;
+    }
+
+    // Cancel queued message
+    if (data === 'cq') {
+      if (state.queuedMessage) {
+        state.queuedMessage = null;
+        state.queuedMessageId = null;
+        state.queuedChatId = null;
+        try { await ctx.editMessageText('❌ Queued message cancelled.'); } catch { /* ignore */ }
+      }
+      await ctx.answerCallbackQuery('Queue cancelled');
+      return;
+    }
+
+    // Plan: implement
+    if (data === 'pi') {
+      if (!state.currentPlanPath) {
+        await ctx.answerCallbackQuery('No plan found');
+        return;
+      }
+      try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch { /* ignore */ }
+      const chatId = ctx.chat!.id;
+      await processPrompt(ctx.api, chatId, 'Implement the plan');
+      await ctx.answerCallbackQuery('Implementing...');
+      return;
+    }
+
+    // Plan: view full plan
+    if (data === 'pv') {
+      if (!state.currentPlanPath) {
+        await ctx.answerCallbackQuery('No plan found');
+        return;
+      }
+      try {
+        const content = await readFile(state.currentPlanPath, 'utf-8');
+        const chunks = formatForTelegram(content);
+        for (const chunk of chunks) {
+          try {
+            await ctx.api.sendMessage(ctx.chat!.id, chunk.text, {
+              parse_mode: chunk.parseMode,
+            });
+          } catch {
+            await ctx.api.sendMessage(ctx.chat!.id, chunk.text.substring(0, 4000));
+          }
+        }
+      } catch {
+        await ctx.api.sendMessage(ctx.chat!.id, '❌ Could not read plan file.');
+      }
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    // Plan: discard
+    if (data === 'pd') {
+      state.currentPlanPath = null;
+      try { await ctx.editMessageText('📋 Plan discarded.'); } catch { /* ignore */ }
+      await ctx.answerCallbackQuery('Discarded');
+      await drainQueue(ctx.api, ctx.chat!.id);
+      return;
+    }
+
+    // Answer question — single-select: aq:optionIndex
+    if (data.startsWith('aq:')) {
+      const optIdx = parseInt(data.substring(3), 10);
+      const pq = state.pendingQuestion;
+      if (!pq) { await ctx.answerCallbackQuery('No question pending'); return; }
+      const q = pq.questions[pq.currentIndex];
+      const opt = q.options[optIdx];
+      if (!opt) { await ctx.answerCallbackQuery('Invalid option'); return; }
+      pq.answers[q.question] = opt.label;
+      try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch { /* ignore */ }
+      if (pq.currentIndex < pq.questions.length - 1) {
+        pq.currentIndex++;
+        pq.selectedOptions.clear();
+        await showCurrentQuestion(ctx.api, ctx.chat!.id);
+      } else {
+        await submitQuestionAnswers(ctx.api, ctx.chat!.id);
+      }
+      await ctx.answerCallbackQuery(opt.label);
+      return;
+    }
+
+    // Toggle multi-select option: at:optionIndex
+    if (data.startsWith('at:')) {
+      const optIdx = parseInt(data.substring(3), 10);
+      const pq = state.pendingQuestion;
+      if (!pq) { await ctx.answerCallbackQuery('No question pending'); return; }
+      if (pq.selectedOptions.has(optIdx)) {
+        pq.selectedOptions.delete(optIdx);
+      } else {
+        pq.selectedOptions.add(optIdx);
+      }
+      const q = pq.questions[pq.currentIndex];
+      const kb = questionKeyboard(q.options, q.multiSelect, pq.selectedOptions);
+      try { await ctx.editMessageReplyMarkup({ reply_markup: kb }); } catch { /* ignore */ }
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    // Submit multi-select answers: as
+    if (data === 'as') {
+      const pq = state.pendingQuestion;
+      if (!pq) { await ctx.answerCallbackQuery('No question pending'); return; }
+      const q = pq.questions[pq.currentIndex];
+      const labels = [...pq.selectedOptions].sort((a, b) => a - b)
+        .map(i => q.options[i]?.label).filter(Boolean);
+      if (labels.length === 0) {
+        await ctx.answerCallbackQuery('Select at least one option');
+        return;
+      }
+      pq.answers[q.question] = labels.join(', ');
+      try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch { /* ignore */ }
+      if (pq.currentIndex < pq.questions.length - 1) {
+        pq.currentIndex++;
+        pq.selectedOptions.clear();
+        await showCurrentQuestion(ctx.api, ctx.chat!.id);
+      } else {
+        await submitQuestionAnswers(ctx.api, ctx.chat!.id);
+      }
+      await ctx.answerCallbackQuery('Submitted');
       return;
     }
 
@@ -125,10 +268,10 @@ export async function handleCallback(ctx: Context): Promise<void> {
       return;
     }
 
-    // Session fork: sf:messageIndex
-    if (data.startsWith('sf:')) {
+    // Session rewind: sr:messageIndex
+    if (data.startsWith('sr:')) {
       const msgIdx = parseInt(data.substring(3), 10);
-      await handleForkSession(ctx, msgIdx);
+      await handleRewindSession(ctx, msgIdx);
       await ctx.answerCallbackQuery();
       return;
     }
@@ -181,7 +324,7 @@ export async function handleCallback(ctx: Context): Promise<void> {
         `<b>Session:</b> ${escapeHtml(session.summary)}\n` +
         `<b>Messages:</b> ${session.messageCount}\n\n` +
         `Send a message to continue this session.`;
-      await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: sessionLoadedKeyboard() });
+      await ctx.editMessageText(text, { parse_mode: 'HTML' });
       await ctx.answerCallbackQuery();
       return;
     }
@@ -197,9 +340,20 @@ export async function handleCallback(ctx: Context): Promise<void> {
       return;
     }
 
-    // New project (from /start keyboard)
+    // New session (from /start keyboard)
     if (data === 'new') {
-      await handleNewProject(ctx);
+      state.currentSessionId = null;
+      await ctx.editMessageText(
+        `<b>✨ New session</b>\n\nSend a message to start.`,
+        { parse_mode: 'HTML' }
+      );
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    // Browse directory for new project (from /projects keyboard)
+    if (data === 'newdir') {
+      await handleBrowseDirectory(ctx);
       await ctx.answerCallbackQuery();
       return;
     }

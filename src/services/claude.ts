@@ -8,7 +8,9 @@ export interface ClaudeEvents {
   'tool-use': [toolName: string, detail: string];
   'tool-result': [toolName: string, lineCount: number, isError: boolean];
   'assistant-text': [fullText: string];
-  result: [text: string, sessionId: string, costUsd: number, durationMs: number];
+  'ask-user': [questions: Array<{ question: string; header: string; options: Array<{ label: string; description: string }>; multiSelect: boolean }>];
+  'plan-created': [planFilePath: string];
+  result: [text: string, sessionId: string, durationMs: number, contextPercent: number];
   error: [message: string];
 }
 
@@ -34,6 +36,12 @@ function summarizeToolInput(toolName: string, input: any, cwd: string): string {
         return truncDetail(input.query || '');
       case 'Agent':
         return truncDetail(input.description || '');
+      case 'AskUserQuestion':
+        return truncDetail(input.questions?.[0]?.question || '');
+      case 'EnterPlanMode':
+        return '';
+      case 'ExitPlanMode':
+        return '';
       default:
         return '';
     }
@@ -201,6 +209,12 @@ export class ClaudeProcess extends EventEmitter<ClaudeEvents> {
             }
             const detail = summarizeToolInput(tool.name, tool.input, this.cwd);
             this.emit('tool-use', tool.name, detail);
+            if (tool.name === 'AskUserQuestion' && tool.input?.questions) {
+              this.emit('ask-user', tool.input.questions);
+            }
+            if (tool.name === 'ExitPlanMode' && tool.input?.planFilePath) {
+              this.emit('plan-created', tool.input.planFilePath);
+            }
           }
         }
         break;
@@ -224,8 +238,8 @@ export class ClaudeProcess extends EventEmitter<ClaudeEvents> {
           'result',
           event.result || '',
           event.session_id || '',
-          event.total_cost_usd || 0,
-          event.duration_ms || 0
+          event.duration_ms || 0,
+          this.calcContextPercent(event)
         );
         break;
     }
@@ -246,15 +260,35 @@ export class ClaudeProcess extends EventEmitter<ClaudeEvents> {
     }
   }
 
+  private calcContextPercent(event: any): number {
+    // Extract from modelUsage (has contextWindow)
+    const mu = event.modelUsage;
+    if (mu) {
+      const model = Object.values(mu)[0] as any;
+      if (model?.contextWindow) {
+        const used = (model.inputTokens || 0) + (model.outputTokens || 0)
+          + (model.cacheReadInputTokens || 0) + (model.cacheCreationInputTokens || 0);
+        return (used / model.contextWindow) * 100;
+      }
+    }
+    return 0;
+  }
+
   kill(): void {
     this.cancelled = true;
     if (this.process && !this.process.killed) {
-      this.process.kill('SIGTERM');
+      // SIGINT triggers graceful shutdown — CLI saves session state before exiting
+      this.process.kill('SIGINT');
+      setTimeout(() => {
+        if (this.process && !this.process.killed) {
+          this.process.kill('SIGTERM');
+        }
+      }, 3000);
       setTimeout(() => {
         if (this.process && !this.process.killed) {
           this.process.kill('SIGKILL');
         }
-      }, 5000);
+      }, 6000);
     }
   }
 }

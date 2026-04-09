@@ -1,7 +1,7 @@
 import { access } from 'fs/promises';
 import type { Context } from 'grammy';
-import { listProjects, listSessions, getSessionHistory, forkSessionAt } from '../services/projects.js';
-import { projectMenuKeyboard, sessionListKeyboard, sessionLoadedKeyboard, historyKeyboard } from '../ui/keyboards.js';
+import { listProjects, listSessions, getSessionHistory, rewindSessionTo } from '../services/projects.js';
+import { sessionListKeyboard, historyKeyboard } from '../ui/keyboards.js';
 import { state } from '../state/session-state.js';
 import { paginate } from '../ui/paginator.js';
 
@@ -20,16 +20,14 @@ export async function handleProjectSelect(ctx: Context, projectIndex: number): P
   state.currentProjectDir = project.dirName;
   state.currentSessionId = null;
 
-  const keyboard = projectMenuKeyboard(projectIndex);
-  const warning = pathExists ? '' : '\n\n⚠️ <b>Warning:</b> Directory not found on disk. Sessions can still be browsed but new prompts may fail.';
+  const warning = pathExists ? '' : '\n\n⚠️ <b>Warning:</b> Directory not found on disk. New prompts may fail.';
   const text =
-    `<b>📂 ${escapeHtml(project.displayName)}</b>\n` +
-    `📍 <code>${escapeHtml(project.originalPath)}</code>\n` +
-    `💬 ${project.sessionCount} sessions\n` +
-    `🕐 Last active: ${formatDate(project.lastModified)}` +
+    `<b>✨ New session</b>\n\n` +
+    `📍 <code>${escapeHtml(project.originalPath)}</code>\n\n` +
+    `Send a message to start.` +
     warning;
 
-  await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard });
+  await ctx.editMessageText(text, { parse_mode: 'HTML' });
 }
 
 export async function handleSessionList(ctx: Context, projectIndex: number, page: number): Promise<void> {
@@ -86,7 +84,7 @@ export async function handleSessionSelect(ctx: Context, projectIndex: number, se
     `<b>Last active:</b> ${formatDate(session.modified)}\n\n` +
     `Send a message to continue this session.`;
 
-  await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: sessionLoadedKeyboard() });
+  await ctx.editMessageText(text, { parse_mode: 'HTML' });
 }
 
 export async function handleResumeLatest(ctx: Context, projectIndex: number): Promise<void> {
@@ -199,13 +197,13 @@ export async function handleSessionHistory(ctx: Context, page: number): Promise<
 
 export async function handleHistoryCommand(ctx: Context): Promise<void> {
   if (!state.currentProjectPath || !state.currentSessionId) {
-    await ctx.reply('No session loaded. Use /projects to select one.');
+    await ctx.reply('No session loaded. Use /resume to select one.');
     return;
   }
   await handleSessionHistory(ctx, 0);
 }
 
-export async function handleForkSession(ctx: Context, messageIndex: number): Promise<void> {
+export async function handleRewindSession(ctx: Context, messageIndex: number): Promise<void> {
   if (!state.currentProjectPath || !state.currentSessionId) {
     try { await ctx.answerCallbackQuery('No session loaded'); } catch { /* ignore */ }
     return;
@@ -214,18 +212,17 @@ export async function handleForkSession(ctx: Context, messageIndex: number): Pro
   const dirName = state.currentProjectDir || pathToDirName(state.currentProjectPath);
 
   try {
-    const newSessionId = await forkSessionAt(dirName, state.currentSessionId, messageIndex);
-    state.currentSessionId = newSessionId;
+    await rewindSessionTo(dirName, state.currentSessionId, messageIndex);
 
     await ctx.editMessageText(
-      `<b>🔀 Session forked</b>\n\n` +
-      `Forked at message ${messageIndex + 1}. Send a message to continue from this point.`,
+      `<b>⏪ Session rewound</b>\n\n` +
+      `Rewound to message ${messageIndex + 1}. Send a message to continue from this point.`,
       { parse_mode: 'HTML' }
     );
   } catch (err: any) {
     const msg = err.code === 'ENOENT'
       ? 'Session file not found'
-      : 'Failed to fork session';
+      : 'Failed to rewind session';
     try { await ctx.answerCallbackQuery(msg); } catch { /* ignore */ }
   }
 }

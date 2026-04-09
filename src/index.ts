@@ -10,10 +10,12 @@ async function main() {
   await bot.api.setMyCommands([
     { command: 'start', description: 'Show welcome message' },
     { command: 'projects', description: 'Browse projects' },
-    { command: 'session', description: 'Switch or start sessions' },
-    { command: 'new', description: 'Start a new project' },
-    { command: 'cancel', description: 'Cancel running request' },
+    { command: 'resume', description: 'Switch or resume sessions' },
+    { command: 'new', description: 'Start new session' },
+    { command: 'rewind', description: 'Rewind session to a previous point' },
     { command: 'status', description: 'Show current state' },
+    { command: 'bash', description: 'Run a shell command directly' },
+    { command: 'plan', description: 'View current plan' },
   ]);
 
   bot.start({

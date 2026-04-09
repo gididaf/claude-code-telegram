@@ -1,5 +1,4 @@
 import { access, readdir, readFile, stat, writeFile } from 'fs/promises';
-import { randomUUID } from 'crypto';
 import { join } from 'path';
 import { config } from '../config.js';
 import type { ConversationMessage, ProjectInfo, SessionInfo, SessionsIndex } from '../types.js';
@@ -160,7 +159,19 @@ async function parseSessionJsonl(filePath: string): Promise<SessionMeta> {
       if (!msg?.role) continue;
 
       if (msg.role === 'user' || msg.role === 'assistant') {
-        messageCount++;
+        // Count only visible messages (same filter as getSessionHistory)
+        let text = '';
+        if (typeof msg.content === 'string') {
+          text = msg.content;
+        } else if (Array.isArray(msg.content)) {
+          text = msg.content
+            .filter((b: any) => b.type === 'text' && b.text)
+            .map((b: any) => b.text)
+            .join('\n');
+        }
+        if (text && !(text.startsWith('<') && !text.includes('\n') && text.endsWith('>'))) {
+          messageCount++;
+        }
       }
 
       if (d.timestamp) {
@@ -248,11 +259,10 @@ export async function getSessionHistory(dirName: string, sessionId: string): Pro
 }
 
 /**
- * Fork a session at a specific visible message index.
- * Creates a new .jsonl file containing all raw lines up to that message.
- * Returns the new session ID.
+ * Rewind a session to a specific visible message index.
+ * Truncates the .jsonl file in-place, removing all lines after that message.
  */
-export async function forkSessionAt(dirName: string, sessionId: string, messageIndex: number): Promise<string> {
+export async function rewindSessionTo(dirName: string, sessionId: string, messageIndex: number): Promise<void> {
   const filePath = join(config.claudeProjectsDir, dirName, `${sessionId}.jsonl`);
   const raw = await readFile(filePath, 'utf-8');
   const lines = raw.split('\n').filter(l => l.trim());
@@ -287,14 +297,9 @@ export async function forkSessionAt(dirName: string, sessionId: string, messageI
     }
   }
 
-  // Keep all raw lines up to and including cutAfterLine
+  // Truncate file in-place — keep all raw lines up to and including cutAfterLine
   const keptLines = lines.slice(0, cutAfterLine + 1);
-
-  const newSessionId = randomUUID();
-  const newPath = join(config.claudeProjectsDir, dirName, `${newSessionId}.jsonl`);
-  await writeFile(newPath, keptLines.join('\n') + '\n');
-
-  return newSessionId;
+  await writeFile(filePath, keptLines.join('\n') + '\n');
 }
 
 function dirNameToPath(dirName: string): string {

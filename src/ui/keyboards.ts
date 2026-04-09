@@ -26,16 +26,11 @@ export function projectListKeyboard(projects: ProjectInfo[], page: number): { ke
   for (const btn of navRow) {
     kb.text(btn.text, btn.data);
   }
+  if (navRow.length > 0) kb.row();
+
+  kb.text('📁 New from Directory', 'newdir');
 
   return { keyboard: kb, pageInfo: pageData };
-}
-
-export function projectMenuKeyboard(projectIndex: number): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('▶ Resume Last Session', `pr:${projectIndex}`).row()
-    .text('📋 Browse Sessions', `sl:${projectIndex}:0`).row()
-    .text('✨ New Session', `sn:${projectIndex}`).row()
-    .text('◀ Back to Projects', 'p:0');
 }
 
 export function sessionListKeyboard(
@@ -68,8 +63,7 @@ export function sessionListKeyboard(
   }
   if (navRow.length > 0) kb.row();
 
-  kb.text('✨ New Session', `sn:${projectIndex}`)
-    .text('◀ Back', `ps:${projectIndex}`);
+  kb.text('◀ Back', `ps:${projectIndex}`);
 
   return { keyboard: kb, pageInfo: pageData };
 }
@@ -102,8 +96,6 @@ export function sessionListKeyboardByDir(
   }
   if (navRow.length > 0) kb.row();
 
-  kb.text('✨ New Session', 'snc');
-
   return { keyboard: kb, pageInfo: pageData };
 }
 
@@ -115,12 +107,12 @@ export function historyKeyboard(
 ): InlineKeyboard {
   const kb = new InlineKeyboard();
 
-  // Fork buttons — only for assistant (Claude) messages
+  // Rewind buttons — only for assistant (Claude) messages
   let btnCount = 0;
   for (let i = 0; i < roles.length; i++) {
     if (roles[i] !== 'assistant') continue;
     const globalIdx = firstMsgIndex + i;
-    kb.text(`🔀 Fork at #${globalIdx + 1}`, `sf:${globalIdx}`);
+    kb.text(`⏪ Rewind to #${globalIdx + 1}`, `sr:${globalIdx}`);
     btnCount++;
     if (btnCount % 2 === 0) kb.row();
   }
@@ -143,19 +135,50 @@ export function historyKeyboard(
   return kb;
 }
 
-export function sessionLoadedKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('📜 View History', 'sh:0');
-}
-
 export function startKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('📂 Browse Projects', 'p:0')
-    .text('🆕 New Project', 'new');
+    .text('📂 Projects', 'p:0')
+    .text('✨ New Session', 'new');
+}
+
+export function questionKeyboard(
+  options: Array<{ label: string; description: string }>,
+  multiSelect: boolean,
+  selectedOptions?: Set<number>,
+): InlineKeyboard {
+  const kb = new InlineKeyboard();
+
+  for (let i = 0; i < options.length; i++) {
+    if (multiSelect) {
+      const check = selectedOptions?.has(i) ? '☑' : '☐';
+      kb.text(`${check} ${options[i].label}`, `at:${i}`).row();
+    } else {
+      kb.text(options[i].label, `aq:${i}`).row();
+    }
+  }
+
+  if (multiSelect) {
+    const count = selectedOptions?.size || 0;
+    kb.text(`✅ Submit${count > 0 ? ` (${count})` : ''}`, 'as').row();
+  }
+
+  return kb;
+}
+
+export function planKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text('✅ Implement', 'pi')
+    .text('📋 View Plan', 'pv')
+    .row()
+    .text('❌ Discard', 'pd');
 }
 
 export function cancelKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text('✋ Cancel', 'cancel');
+}
+
+export function queueCancelKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text('❌ Cancel', 'cq');
 }
 
 function truncLabel(text: string, maxLen: number): string {

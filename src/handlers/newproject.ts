@@ -18,15 +18,32 @@ function displayPath(fullPath: string): string {
   return fullPath;
 }
 
-export async function handleNewProject(ctx: Context): Promise<void> {
+export async function handleNewCommand(ctx: Context): Promise<void> {
+  if (!state.currentProjectPath) {
+    await ctx.reply('No project selected. Use /projects to pick one first.');
+    return;
+  }
+
+  state.currentSessionId = null;
+
+  const path = state.currentProjectPath;
+  const text =
+    `<b>✨ New session</b>\n\n` +
+    `📍 <code>${escapeHtml(path)}</code>\n\n` +
+    `Send a message to start.`;
+
+  await ctx.reply(text, { parse_mode: 'HTML' });
+}
+
+export async function handleBrowseDirectory(ctx: Context): Promise<void> {
   state.awaitingFolderName = null;
-  await showDirectory(ctx, homedir(), 0, false);
+  await showDirectory(ctx, homedir(), 0, ctx.callbackQuery != null);
 }
 
 export async function handleDirNavigate(ctx: Context, callbackData: string, page: number = 0): Promise<void> {
   const path = decodePath(callbackData);
   if (!path) {
-    await ctx.answerCallbackQuery('Path expired. Use /new again.');
+    await ctx.answerCallbackQuery('Path expired. Use /projects again.');
     return;
   }
   state.awaitingFolderName = null;
@@ -36,7 +53,7 @@ export async function handleDirNavigate(ctx: Context, callbackData: string, page
 export async function handleDirSelect(ctx: Context, callbackData: string): Promise<void> {
   const path = decodePath(callbackData);
   if (!path) {
-    await ctx.answerCallbackQuery('Path expired. Use /new again.');
+    await ctx.answerCallbackQuery('Path expired. Use /projects again.');
     return;
   }
 
@@ -56,7 +73,7 @@ export async function handleDirSelect(ctx: Context, callbackData: string): Promi
 export async function handleCreateFolderPrompt(ctx: Context, callbackData: string): Promise<void> {
   const path = decodePath(callbackData);
   if (!path) {
-    await ctx.answerCallbackQuery('Path expired. Use /new again.');
+    await ctx.answerCallbackQuery('Path expired. Use /projects again.');
     return;
   }
 

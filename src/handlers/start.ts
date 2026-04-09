@@ -13,9 +13,9 @@ export async function handleStart(ctx: Context): Promise<void> {
     `<b>Commands:</b>\n` +
     `/start — Show this message\n` +
     `/projects — Browse or switch projects\n` +
-    `/session — Switch or start sessions\n` +
-    `/new — New project from directory\n` +
-    `/cancel — Cancel running request` +
+    `/resume — Switch or resume sessions\n` +
+    `/new — Start new session\n` +
+    `/rewind — Rewind session to a previous point` +
     statusLine;
 
   await ctx.reply(welcomeMessage, {

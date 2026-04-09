@@ -137,9 +137,12 @@ export function formatForTelegram(text: string): FormattedMessage[] {
   });
 }
 
-export function formatCostFooter(costUsd: number, durationMs: number): string {
-  if (costUsd <= 0) return '';
-  return `\n\n💲 $${costUsd.toFixed(4)} | ⏱ ${(durationMs / 1000).toFixed(1)}s`;
+export function formatCostFooter(durationMs: number, contextPercent: number): string {
+  const parts: string[] = [];
+  if (contextPercent > 0) parts.push(`📊 ${contextPercent.toFixed(1)}% context`);
+  if (durationMs > 0) parts.push(`⏱ ${(durationMs / 1000).toFixed(1)}s`);
+  if (parts.length === 0) return '';
+  return `\n\n${parts.join(' | ')}`;
 }
 
 export function truncateForEdit(text: string, suffix: string = ''): string {
