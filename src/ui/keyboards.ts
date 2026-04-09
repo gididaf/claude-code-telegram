@@ -170,7 +170,7 @@ export function planKeyboard(): InlineKeyboard {
     .text('✅ Implement', 'pi')
     .text('📋 View Plan', 'pv')
     .row()
-    .text('❌ Discard', 'pd');
+    .text('✏️ Refine', 'pr');
 }
 
 export function cancelKeyboard(): InlineKeyboard {

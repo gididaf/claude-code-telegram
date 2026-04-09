@@ -109,12 +109,17 @@ export async function handleCallback(ctx: Context): Promise<void> {
       return;
     }
 
-    // Plan: discard
-    if (data === 'pd') {
-      state.currentPlanPath = null;
-      try { await ctx.editMessageText('📋 Plan discarded.'); } catch { /* ignore */ }
-      await ctx.answerCallbackQuery('Discarded');
-      await drainQueue(ctx.api, ctx.chat!.id);
+    // Plan: refine
+    if (data === 'pr') {
+      if (!state.currentPlanPath) {
+        await ctx.answerCallbackQuery('No plan found');
+        return;
+      }
+      try {
+        await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+      } catch { /* ignore */ }
+      await ctx.api.sendMessage(ctx.chat!.id, '✏️ What should be changed in the plan?');
+      await ctx.answerCallbackQuery('Send your feedback');
       return;
     }
 
