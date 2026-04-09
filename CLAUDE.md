@@ -31,13 +31,17 @@ Single-user, single-process. No database — all state is in-memory (`src/state/
 | `/status` | `status.ts:handleStatus` | Show current state |
 | `/bash` | `bash.ts:handleBash` | Run shell command directly (not through Claude) |
 | `/plan` | `plan.ts:handlePlan` | View current plan + implement/discard buttons |
+| `/compact` | `compact.ts:handleCompact` | Compact conversation to free context |
+| `/diff` | `diff.ts:handleDiff` | Show git diff with multi-message splitting |
 
 Commands are registered in `bot.ts` and autocomplete is set via `setMyCommands` in `index.ts`.
 
 ### Data Flow (sending a prompt)
 
 ```
-User types message → auth middleware → chat handler
+User types message or sends attachment → auth middleware → chat handler / attachment handler
+  → attachments: download file to /tmp/claude-telegram/, build prompt with [Attached image/file: /path] + caption
+  → voice messages: download OGG to /tmp/claude-telegram/, show "🎤 Transcribing...", ffmpeg convert to WAV, whisper.cpp transcribe, edit indicator to show "🎤 <transcribed text>", route transcribed text as prompt (requires whisper.cpp + ffmpeg — if missing, offers "📦 Install whisper.cpp" button that asks Claude to install it)
   → if Claude is busy: queue message (single slot, latest wins), show "📝 … Queued" with ❌ Cancel
   → otherwise: sends "⏳ Thinking..." message with inline ✋ Cancel button
   → spawns: claude -p "msg" --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages [-r sessionId]
@@ -56,6 +60,8 @@ User types message → auth middleware → chat handler
 - **`src/handlers/callbacks.ts`** — Central callback router for all inline keyboard actions.
 - **`src/services/directory-browser.ts`** — Filesystem navigation. In-memory `pathCache` Map solves Telegram's 64-byte callback data limit.
 - **`src/handlers/bash.ts`** — Direct shell command execution via `/bash`. Runs in current project dir, 30s timeout, output in `<pre>` block.
+- **`src/services/telegram-files.ts`** — Downloads Telegram file attachments (photos, documents) to `/tmp/claude-telegram/`. Uses Bot API `getFile` + `fetch`.
+- **`src/services/whisper.ts`** — Voice transcription via local whisper.cpp. Lazy capability detection (caches `hasWhisper`/`hasFfmpeg` on first voice message). Pipeline: OGG→WAV (ffmpeg -ar 16000 -ac 1) → text (whisper-cli --no-timestamps -l auto). Both ffmpeg and whisper.cpp are optional — if missing, user is offered an install button. `resolveModelPath()` searches `~/.local/share/whisper-models/`, `~/.cache/whisper/`, and Homebrew paths for `ggml-<model>.bin`. `resetCapabilities()` clears the cached detection (called before auto-install so next attempt re-checks). Temp WAV/OGG cleaned up after transcription.
 - **`src/state/session-state.ts`** — Single `BotState` object. `awaitingFolderName` distinguishes folder name input from Claude prompts. Queue state: `queuedMessage`, `queuedMessageId`, `queuedChatId`. `pendingQuestion` tracks AskUserQuestion state.
 
 ### Callback Data Scheme
@@ -88,6 +94,8 @@ Telegram limits callback data to 64 bytes. Short prefixes:
 | `aq:` | Answer question (single-select) | `aq:2` (option index) |
 | `at:` | Toggle multi-select option | `at:1` (option index) |
 | `as` | Submit multi-select answers | `as` |
+| `df:` | Diff file view | `df:3` (file index) |
+| `wi` | Install whisper.cpp via Claude | `wi` |
 
 ## Telegram Constraints
 
@@ -113,6 +121,10 @@ Telegram limits callback data to 64 bytes. Short prefixes:
 - **Message Queue**: Single-slot queue. When user sends a message while Claude is busy, the user's message is deleted and replaced with a bot "📝 … Queued" notification with ❌ Cancel. Subsequent messages edit the same notification (latest wins). On result/error/cancel, queue auto-drains: notification edited to "💬 …" (preserves context), then `processPrompt()` runs the queued text. Queue can also fire after cancel — if user cancels the running process and a queue exists, it sends immediately.
 - **AskUserQuestion**: The CLI can't show interactive question UI in `-p` mode (returns `is_error=true`). We intercept the `tool_use` event, capture the question data, and after the result is displayed show the question as a separate Telegram message with inline keyboard buttons. Single-select: tap a button to answer immediately. Multi-select: toggle buttons (☐/☑) + Submit. Free text: user types a message (combined with any checked options for multi-select using `Selected: X, Y\nAdditional input: text` format). Supports 1-4 questions shown sequentially. Answers sent as next prompt in the same session via `-r`. State tracked in `state.pendingQuestion` (`QuestionData[]`, `currentIndex`, `answers`, `selectedOptions`).
 - **`/bash` command**: Runs shell commands directly without Claude. Uses `child_process.exec` with 30s timeout in the current project directory. Output displayed in `<pre>` block with HTML escaping.
+- **CLI slash commands work in `-p` mode**: Sending `/compact`, `/compact <instructions>`, etc. as the prompt text in `-p -r <sessionId>` mode works — the CLI recognizes its own slash commands. The `init` event's `slash_commands` array lists all available ones. The result text is typically empty for meta-commands; the bot uses dedicated handlers (e.g. `compact.ts`) rather than `processPrompt` to show appropriate feedback.
+- **`/diff` command**: Interactive file picker. Shows file list with `+N -N` stats as inline keyboard buttons. Tapping a file sends its diff as `<pre><code class="language-diff">` message(s) — the `language-diff` class triggers syntax highlighting (green/red for +/- lines) on Telegram Desktop/macOS clients. Does NOT use `formatForTelegram()` — diff markers would be mangled by markdown→HTML conversion. Has its own `splitPreformatted()`. Default mode runs `git diff --numstat HEAD` + `git ls-files --others --exclude-standard`. With args, passes through to `git diff`. File list and args stored in `state.diffFiles`/`state.diffArgs` for callback lookup (`df:N`). For untracked files, uses `git diff --no-index /dev/null <file>`. Non-blocking — works while Claude is processing. Fallback for repos with no commits (`HEAD` unknown).
+- **Attachments**: Photos and documents sent in Telegram are downloaded to `/tmp/claude-telegram/` and referenced in the prompt as `[Attached image/file: /path]`. Claude Code's `Read` tool natively reads images and PDFs. Photos use the largest available resolution. Documents keep their original filename. Both support captions — the caption becomes the user's prompt text alongside the file reference. Attachments go through the same queue/routing as text messages (handled by `routeMessage` in `chat.ts`). **Media groups (albums)**: When multiple photos/documents are sent together, Telegram delivers them as separate messages sharing a `media_group_id`. These are buffered for 500ms, then flushed as a single prompt with all file paths. Caption can be on any message in the group. Telegram Bot API limits file downloads to 20MB.
+- **Voice messages**: Different pipeline than photo/document attachments. Voice goes through `handleVoice` → download OGG → `transcribeVoice()` (whisper.cpp) → `routeMessage()` with plain text. Photos/documents go through `handleAttachment` → download → `[Attached: /path]` prompt. Voice does NOT use the attachment pipeline. Shows "🎤 Transcribing..." indicator, then edits it to "🎤 <transcribed text>" so user can see what was detected. Only `message:voice` is handled (not `message:audio` which is for music files). Both ffmpeg and whisper.cpp are detected lazily on first voice message and cached for process lifetime. **Auto-install**: If whisper is missing, shows a "📦 Install whisper.cpp" inline button (`wi` callback). Tapping it calls `handleWhisperInstall()` which sends a prompt to Claude asking it to `brew install whisper-cpp`, download the base model to `~/.local/share/whisper-models/`, and install ffmpeg. `resetCapabilities()` is called before install so the next voice message re-detects. Env vars: `WHISPER_MODEL` (default `base`), `WHISPER_MODEL_PATH` (full path override).
 - **Plan Mode**: Claude can enter plan mode via `EnterPlanMode`/`ExitPlanMode` tools (works in `-p` mode). Plans are stored as MD files in `~/.claude/plans/` with random names (e.g. `flickering-leaping-eich.md`). The `ExitPlanMode` tool_use event contains `input.planFilePath` — the bot captures this to populate `state.currentPlanPath`. After a plan-creating result, bot sends a notification with ✅ Implement / 📋 View Plan / ✏️ Refine buttons. Plan files are never deleted (matches CLI behavior — they're permanent records). `ExitPlanMode` returns `is_error: true` in `-p` mode (can't show confirmation UI) — Claude continues anyway and writes a text summary. Refine prompts the user for feedback, which is sent as the next message in the same session. **Trigger gotcha**: prompts like "create a plan" often produce a text-only plan without entering plan mode. Include "plan mode" or "use plan mode" explicitly in the prompt to trigger `EnterPlanMode`/`ExitPlanMode` tools (e.g. "Use plan mode to plan adding feature X").
 - **Context usage footer**: Shows `📊 X% context | ⏱ Xs` instead of cost. Calculated from `modelUsage` in the CLI result event: `(inputTokens + outputTokens + cacheReadInputTokens + cacheCreationInputTokens) / contextWindow * 100`. The ~3% baseline on a 1M model is real — it's the CLI's system prompt, tool definitions, and CLAUDE.md.
 - **messageCount**: Counts only visible messages (same filter as `getSessionHistory` — skips tool_use, tool_result, thinking, system/XML lines). This ensures `/resume` message count matches `/rewind` message count.
@@ -127,3 +139,5 @@ Telegram limits callback data to 64 bytes. Short prefixes:
 | `DEFAULT_PROJECT_PATH` | No | null |
 | `STREAM_UPDATE_INTERVAL_MS` | No | `2500` |
 | `PROCESS_TIMEOUT_MS` | No | `300000` |
+| `WHISPER_MODEL` | No | `base` |
+| `WHISPER_MODEL_PATH` | No | null |

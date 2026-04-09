@@ -17,6 +17,13 @@ export interface PendingQuestion {
   chatId: number | null;
 }
 
+export interface DiffFile {
+  path: string;
+  added: string;
+  removed: string;
+  untracked: boolean;
+}
+
 export interface BotState {
   currentProjectPath: string | null;
   currentProjectDir: string | null;
@@ -32,6 +39,8 @@ export interface BotState {
   queuedChatId: number | null;
   pendingQuestion: PendingQuestion | null;
   currentPlanPath: string | null;
+  diffFiles: DiffFile[] | null;
+  diffArgs: string | null;
 }
 
 export const state: BotState = {
@@ -49,6 +58,8 @@ export const state: BotState = {
   queuedChatId: null,
   pendingQuestion: null,
   currentPlanPath: null,
+  diffFiles: null,
+  diffArgs: null,
 };
 
 export function resetProcessState(): void {

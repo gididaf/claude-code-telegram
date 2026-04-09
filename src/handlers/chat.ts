@@ -1,11 +1,14 @@
 import type { Context } from 'grammy';
 import type { Api } from 'grammy';
+import { InlineKeyboard } from 'grammy';
 import { runClaude } from '../services/claude.js';
 import { state, resetProcessState } from '../state/session-state.js';
 import { config } from '../config.js';
 import { formatForTelegram, formatCostFooter, truncateForEdit, type FormattedMessage } from '../ui/formatter.js';
 import { cancelKeyboard, queueCancelKeyboard, questionKeyboard, planKeyboard } from '../ui/keyboards.js';
 import { handleFolderNameInput } from './newproject.js';
+import { downloadTelegramFile } from '../services/telegram-files.js';
+import { transcribeVoice, isVoiceSupported, resetCapabilities, WhisperError } from '../services/whisper.js';
 import type { QuestionData } from '../state/session-state.js';
 
 export async function handleChat(ctx: Context): Promise<void> {
@@ -15,7 +18,168 @@ export async function handleChat(ctx: Context): Promise<void> {
   // Check if we're waiting for a folder name
   if (await handleFolderNameInput(ctx)) return;
 
-  // Check if we're answering a question from Claude
+  await routeMessage(ctx, text);
+}
+
+// --- Media group (album) batching ---
+
+interface PendingMediaGroup {
+  files: Array<{ fileId: string; fileName?: string; typeLabel: string }>;
+  caption: string;
+  ctx: Context; // use the first message's context for routing
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const mediaGroups = new Map<string, PendingMediaGroup>();
+const MEDIA_GROUP_WAIT_MS = 500;
+
+export async function handleAttachment(ctx: Context): Promise<void> {
+  const file = extractFileInfo(ctx);
+  if (!file) {
+    await ctx.reply('Unsupported attachment type. Send a photo or document.');
+    return;
+  }
+
+  const mediaGroupId = ctx.message?.media_group_id;
+
+  if (mediaGroupId) {
+    // Part of an album — buffer it
+    let group = mediaGroups.get(mediaGroupId);
+    if (group) {
+      group.files.push(file);
+      if (ctx.message?.caption) group.caption = ctx.message.caption;
+      clearTimeout(group.timer);
+    } else {
+      group = {
+        files: [file],
+        caption: ctx.message?.caption || '',
+        ctx,
+        timer: null as any,
+      };
+      mediaGroups.set(mediaGroupId, group);
+    }
+    group.timer = setTimeout(() => flushMediaGroup(mediaGroupId), MEDIA_GROUP_WAIT_MS);
+    return;
+  }
+
+  // Single attachment — process immediately
+  await processSingleAttachment(ctx, file, ctx.message?.caption || '');
+}
+
+export async function handleVoice(ctx: Context): Promise<void> {
+  const voice = ctx.message?.voice;
+  if (!voice) return;
+
+  const supported = await isVoiceSupported();
+  if (!supported) {
+    const kb = new InlineKeyboard().text('📦 Install whisper.cpp', 'wi');
+    await ctx.reply(
+      '🎤 Voice messages require whisper.cpp (not installed).\n\n' +
+      'Want Claude to install it for you? (~150MB download)',
+      { reply_markup: kb },
+    );
+    return;
+  }
+
+  // Show brief indicator while transcribing
+  const indicator = await ctx.reply('\u{1F3A4} Transcribing...');
+
+  let text: string;
+  try {
+    const oggPath = await downloadTelegramFile(ctx.api, voice.file_id, `voice_${voice.file_unique_id}.ogg`);
+    text = await transcribeVoice(oggPath);
+  } catch (err: any) {
+    const msg = err instanceof WhisperError
+      ? `Voice transcription failed: ${err.message}`
+      : `Voice error: ${err.message}`;
+    try { await ctx.api.editMessageText(ctx.chat!.id, indicator.message_id, msg); } catch { /* ignore */ }
+    return;
+  }
+
+  if (!text) {
+    try { await ctx.api.editMessageText(ctx.chat!.id, indicator.message_id, 'Could not transcribe voice message (empty result).'); } catch { /* ignore */ }
+    return;
+  }
+
+  // Show transcribed text so the user can see what was detected
+  try { await ctx.api.editMessageText(ctx.chat!.id, indicator.message_id, `\u{1F3A4} ${text}`); } catch { /* ignore */ }
+
+  await routeMessage(ctx, text);
+}
+
+export async function handleWhisperInstall(ctx: Context): Promise<void> {
+  resetCapabilities();
+  const installPrompt =
+    'I need whisper.cpp installed for voice transcription. ' +
+    'Install whisper-cpp via Homebrew (brew install whisper-cpp) and download the base GGML model: ' +
+    'mkdir -p ~/.local/share/whisper-models && ' +
+    'curl -L -o ~/.local/share/whisper-models/ggml-base.bin ' +
+    'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin — ' +
+    'Also install ffmpeg if not already present (brew install ffmpeg). ' +
+    'Be brief, just run the commands.';
+  await routeMessage(ctx, installPrompt);
+}
+
+function extractFileInfo(ctx: Context): { fileId: string; fileName?: string; typeLabel: string } | null {
+  if (ctx.message?.photo) {
+    const photo = ctx.message.photo[ctx.message.photo.length - 1];
+    return { fileId: photo.file_id, typeLabel: 'image' };
+  }
+  if (ctx.message?.document) {
+    return {
+      fileId: ctx.message.document.file_id,
+      fileName: ctx.message.document.file_name || undefined,
+      typeLabel: 'file',
+    };
+  }
+  return null;
+}
+
+async function processSingleAttachment(ctx: Context, file: { fileId: string; fileName?: string; typeLabel: string }, caption: string): Promise<void> {
+  let localPath: string;
+  try {
+    localPath = await downloadTelegramFile(ctx.api, file.fileId, file.fileName);
+  } catch (err: any) {
+    await ctx.reply(`Failed to download attachment: ${err.message}`);
+    return;
+  }
+
+  const prompt = caption
+    ? `[Attached ${file.typeLabel}: ${localPath}]\n\n${caption}`
+    : `[Attached ${file.typeLabel}: ${localPath}]\n\nPlease analyze this ${file.typeLabel}.`;
+
+  await routeMessage(ctx, prompt);
+}
+
+async function flushMediaGroup(mediaGroupId: string): Promise<void> {
+  const group = mediaGroups.get(mediaGroupId);
+  mediaGroups.delete(mediaGroupId);
+  if (!group) return;
+
+  const paths: string[] = [];
+  for (const file of group.files) {
+    try {
+      const localPath = await downloadTelegramFile(group.ctx.api, file.fileId, file.fileName);
+      paths.push(`[Attached ${file.typeLabel}: ${localPath}]`);
+    } catch (err: any) {
+      console.error('Failed to download media group file:', err.message);
+    }
+  }
+
+  if (paths.length === 0) {
+    try { await group.ctx.reply('Failed to download attachments.'); } catch { /* ignore */ }
+    return;
+  }
+
+  const header = paths.join('\n');
+  const prompt = group.caption
+    ? `${header}\n\n${group.caption}`
+    : `${header}\n\nPlease analyze these ${paths.length} attachments.`;
+
+  await routeMessage(group.ctx, prompt);
+}
+
+async function routeMessage(ctx: Context, text: string): Promise<void> {
   if (state.pendingQuestion) {
     await handleQuestionTextAnswer(ctx.api, ctx.chat!.id, text);
     return;

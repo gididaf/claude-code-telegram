@@ -25,6 +25,8 @@ export const config: BotConfig = {
   processTimeoutMs: parseInt(process.env.PROCESS_TIMEOUT_MS || '300000', 10),
   homeDir: home,
   claudeProjectsDir: resolve(home, '.claude', 'projects'),
+  whisperModel: process.env.WHISPER_MODEL || 'base',
+  whisperModelPath: process.env.WHISPER_MODEL_PATH || null,
 };
 
 if (isNaN(config.telegramUserId)) {

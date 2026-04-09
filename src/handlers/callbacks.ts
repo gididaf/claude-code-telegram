@@ -14,7 +14,8 @@ import { decodePath } from '../services/directory-browser.js';
 import { listSessions } from '../services/projects.js';
 import { sessionListKeyboardByDir } from '../ui/keyboards.js';
 import { state, resetProcessState } from '../state/session-state.js';
-import { drainQueue, showCurrentQuestion, submitQuestionAnswers, processPrompt } from './chat.js';
+import { drainQueue, showCurrentQuestion, submitQuestionAnswers, processPrompt, handleWhisperInstall } from './chat.js';
+import { showFileDiff } from './diff.js';
 import { questionKeyboard } from '../ui/keyboards.js';
 import { readFile } from 'fs/promises';
 import { formatForTelegram } from '../ui/formatter.js';
@@ -68,6 +69,14 @@ export async function handleCallback(ctx: Context): Promise<void> {
         try { await ctx.editMessageText('❌ Queued message cancelled.'); } catch { /* ignore */ }
       }
       await ctx.answerCallbackQuery('Queue cancelled');
+      return;
+    }
+
+    // Whisper install
+    if (data === 'wi') {
+      try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch { /* ignore */ }
+      await handleWhisperInstall(ctx);
+      await ctx.answerCallbackQuery('Installing...');
       return;
     }
 
@@ -182,6 +191,18 @@ export async function handleCallback(ctx: Context): Promise<void> {
         await submitQuestionAnswers(ctx.api, ctx.chat!.id);
       }
       await ctx.answerCallbackQuery('Submitted');
+      return;
+    }
+
+    // Diff: show file diff
+    if (data.startsWith('df:')) {
+      const idx = parseInt(data.substring(3), 10);
+      if (!state.diffFiles) {
+        await ctx.answerCallbackQuery('No diff data. Run /diff again.');
+        return;
+      }
+      await showFileDiff(ctx.api, ctx.chat!.id, idx);
+      await ctx.answerCallbackQuery();
       return;
     }
 

@@ -129,7 +129,7 @@ export class ClaudeProcess extends EventEmitter<ClaudeEvents> {
     this.process = spawn(config.claudeCliPath, args, {
       cwd: options.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: { ...process.env, IS_SANDBOX: '1' },
     });
 
     this.process.stdout!.on('data', (chunk: Buffer) => {

@@ -7,6 +7,8 @@ export interface BotConfig {
   processTimeoutMs: number;
   homeDir: string;
   claudeProjectsDir: string;
+  whisperModel: string;
+  whisperModelPath: string | null;
 }
 
 export interface ProjectInfo {

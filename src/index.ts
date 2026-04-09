@@ -16,6 +16,8 @@ async function main() {
     { command: 'status', description: 'Show current state' },
     { command: 'bash', description: 'Run a shell command directly' },
     { command: 'plan', description: 'View current plan' },
+    { command: 'compact', description: 'Compact conversation to free context' },
+    { command: 'diff', description: 'Show git changes' },
   ]);
 
   bot.start({
