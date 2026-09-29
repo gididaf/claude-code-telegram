@@ -32,6 +32,9 @@ interface PendingMediaGroup {
 
 const mediaGroups = new Map<string, PendingMediaGroup>();
 const MEDIA_GROUP_WAIT_MS = 500;
+// How long after a result the process may linger before we assume background
+// agents are still running and show a "waiting" message
+const BACKGROUND_WAIT_MS = 2000;
 
 export async function handleAttachment(ctx: Context): Promise<void> {
   const file = extractFileInfo(ctx);
@@ -273,9 +276,23 @@ export async function processPrompt(api: Api, chatId: number, text: string): Pro
   let currentMessageIds: number[] = [thinkingMsg.message_id];
   let sentChunks = 0;
   let planCreatedThisRun = false;
+  // A run can produce several results: background agents report back after
+  // the first one. turnDone = the last result was shown and no live message
+  // exists yet for what comes next.
+  let turnDone = false;
+  let resultCount = 0;
+  let waitTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // result/error/done handlers await Telegram calls — run them in order so
+  // 'done' never overtakes the result it follows.
+  let chain: Promise<void> = Promise.resolve();
+  const serial = (fn: () => Promise<void>) => {
+    chain = chain.then(fn).catch((err) => console.error('Handler error:', err));
+  };
+  const isCurrent = () => state.runningClaude === claude;
 
   const doEdit = async () => {
-    if (!state.accumulatedText || !state.isProcessing) return;
+    if (!state.accumulatedText || !state.isProcessing || turnDone || !isCurrent()) return;
 
     const displayText = truncateForEdit(state.accumulatedText, '\n\n⏳ ...');
     const targetMsgId = currentMessageIds[currentMessageIds.length - 1];
@@ -307,14 +324,17 @@ export async function processPrompt(api: Api, chatId: number, text: string): Pro
   };
 
   claude.on('init', (sessionId) => {
+    if (!isCurrent()) return;
     state.currentSessionId = sessionId;
   });
 
   claude.on('text-delta', (_delta) => {
+    if (!isCurrent()) return;
     scheduleEdit();
   });
 
   claude.on('ask-user', (questions) => {
+    if (!isCurrent()) return;
     state.pendingQuestion = {
       questions,
       currentIndex: 0,
@@ -326,17 +346,20 @@ export async function processPrompt(api: Api, chatId: number, text: string): Pro
   });
 
   claude.on('plan-created', (planFilePath) => {
+    if (!isCurrent()) return;
     state.currentPlanPath = planFilePath;
     planCreatedThisRun = true;
   });
 
   claude.on('tool-use', (toolName, detail) => {
+    if (!isCurrent()) return;
     const info = detail ? `${toolName}: ${detail}` : toolName;
     state.accumulatedText += `\n🔧 ${info}\n`;
     scheduleEdit();
   });
 
   claude.on('tool-result', (toolName, lineCount, isError) => {
+    if (!isCurrent()) return;
     const icon = isError ? '❌' : '✅';
     const lines = lineCount > 0 ? ` (${lineCount} lines)` : '';
 
@@ -359,21 +382,29 @@ export async function processPrompt(api: Api, chatId: number, text: string): Pro
     scheduleEdit();
   });
 
-  claude.on('result', async (resultText, sessionId, durationMs, contextPercent) => {
+  claude.on('result', (resultText, sessionId, durationMs, contextPercent) => serial(async () => {
     if (editTimer) {
       clearTimeout(editTimer);
       editTimer = null;
     }
-
-    state.currentSessionId = sessionId;
+    if (waitTimer) {
+      clearTimeout(waitTimer);
+      waitTimer = null;
+    }
 
     // If cancelled, just capture session ID — messages already handled by cancel callback
-    if (!state.isProcessing) return;
+    if (!state.runningClaude || isCurrent()) state.currentSessionId = sessionId;
+    if (!state.isProcessing || !isCurrent()) return;
 
     const finalText = resultText || state.accumulatedText || '(empty response)';
     const costFooter = formatCostFooter(durationMs, contextPercent);
     const chunks = formatForTelegram(finalText);
-    const firstMsgId = currentMessageIds[currentMessageIds.length - 1];
+    // Later results (after background agents) get a new message unless a
+    // live "waiting" message already exists for them
+    const firstMsgId = turnDone ? null : currentMessageIds[currentMessageIds.length - 1];
+    turnDone = true;
+    resultCount++;
+    state.accumulatedText = '';
 
     // Helper: try HTML, then plain text, then new message as last resort
     const editOrSend = async (text: string, parseMode: 'HTML' | undefined, editMsgId: number | null, append: string) => {
@@ -424,6 +455,60 @@ export async function processPrompt(api: Api, chatId: number, text: string): Pro
       try { await api.sendMessage(chatId, finalText.substring(0, 4000)); } catch { /* ignore */ }
     }
 
+    // The process normally exits right after its result. If it doesn't,
+    // background agents are still running — show a live message for them.
+    const countAtResult = resultCount;
+    waitTimer = setTimeout(async () => {
+      waitTimer = null;
+      if (!isCurrent() || resultCount !== countAtResult) return;
+      let msgId: number;
+      try {
+        const msg = await api.sendMessage(chatId, '⏳ Waiting for background agents...', { reply_markup: cancelKeyboard() });
+        msgId = msg.message_id;
+      } catch {
+        return;
+      }
+      // The run may have ended (or answered) while the message was sending
+      if (!isCurrent() || resultCount !== countAtResult) {
+        try { await api.deleteMessage(chatId, msgId); } catch { /* ignore */ }
+        return;
+      }
+      currentMessageIds = [msgId];
+      state.lastResponseMessageId = msgId;
+      turnDone = false;
+      scheduleEdit();
+    }, BACKGROUND_WAIT_MS);
+  }));
+
+  claude.on('done', () => serial(async () => {
+    if (waitTimer) {
+      clearTimeout(waitTimer);
+      waitTimer = null;
+    }
+    if (editTimer) {
+      clearTimeout(editTimer);
+      editTimer = null;
+    }
+
+    // Cancelled or already ended by an error
+    if (!state.isProcessing || !isCurrent()) return;
+
+    // A live message with no result after it: the "waiting" message, or the
+    // original "Thinking..." if the process exited without any result
+    if (!turnDone) {
+      const msgId = currentMessageIds[currentMessageIds.length - 1];
+      const leftover = state.accumulatedText
+        ? truncateForEdit(state.accumulatedText, '')
+        : resultCount === 0 ? '(empty response)' : '';
+      try {
+        if (leftover) {
+          await api.editMessageText(chatId, msgId, leftover);
+        } else {
+          await api.deleteMessage(chatId, msgId);
+        }
+      } catch { /* ignore */ }
+    }
+
     resetProcessState();
 
     // Show pending question from AskUserQuestion if any
@@ -446,29 +531,34 @@ export async function processPrompt(api: Api, chatId: number, text: string): Pro
     }
 
     await drainQueue(api, chatId);
-  });
+  }));
 
-  claude.on('error', async (errorMsg) => {
+  claude.on('error', (errorMsg) => serial(async () => {
     if (editTimer) {
       clearTimeout(editTimer);
       editTimer = null;
     }
+    if (waitTimer) {
+      clearTimeout(waitTimer);
+      waitTimer = null;
+    }
 
     // If cancelled, skip — messages already handled by cancel callback
-    if (!state.isProcessing) return;
+    if (!state.isProcessing || !isCurrent()) return;
 
+    const errorText = `❌ Error: ${errorMsg}`;
     try {
-      await api.editMessageText(
-        chatId,
-        currentMessageIds[currentMessageIds.length - 1],
-        `❌ Error: ${errorMsg}`
-      );
+      if (turnDone) {
+        await api.sendMessage(chatId, errorText);
+      } else {
+        await api.editMessageText(chatId, currentMessageIds[currentMessageIds.length - 1], errorText);
+      }
     } catch {
-      try { await api.sendMessage(chatId, `❌ Error: ${errorMsg}`); } catch { /* ignore */ }
+      try { await api.sendMessage(chatId, errorText); } catch { /* ignore */ }
     }
     resetProcessState();
     await drainQueue(api, chatId);
-  });
+  }));
 }
 
 export async function showCurrentQuestion(api: Api, chatId: number): Promise<void> {

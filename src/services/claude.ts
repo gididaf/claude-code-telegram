@@ -12,6 +12,7 @@ export interface ClaudeEvents {
   'plan-created': [planFilePath: string];
   result: [text: string, sessionId: string, durationMs: number, contextPercent: number];
   error: [message: string];
+  done: [];
 }
 
 function summarizeToolInput(toolName: string, input: any, cwd: string): string {
@@ -157,6 +158,9 @@ export class ClaudeProcess extends EventEmitter<ClaudeEvents> {
       if (code !== 0 && code !== null) {
         this.emit('error', `Claude process exited with code ${code}`);
       }
+      // A single run can emit several results (background agents report back
+      // after the first one), so the process exit is the real end of the run.
+      this.emit('done');
     });
   }
 
@@ -179,6 +183,10 @@ export class ClaudeProcess extends EventEmitter<ClaudeEvents> {
   }
 
   private handleEvent(event: any): void {
+    // Subagent internals (their own tool calls, results and text) carry the
+    // parent Agent tool_use id — only the top-level conversation is shown.
+    if (event.parent_tool_use_id) return;
+
     switch (event.type) {
       case 'system':
         if (event.subtype === 'init') {
